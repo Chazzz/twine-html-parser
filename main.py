@@ -157,6 +157,8 @@ class MyHTMLParser(HTMLParser):
   def __init__(self):
     super(MyHTMLParser, self).__init__()
     self.tiddler_divs = []
+    self.empty_divs_allowed = 1
+    self.empty_divs_found = 0
     self.reset_current_div()
 
   def reset_current_div(self):
@@ -164,17 +166,16 @@ class MyHTMLParser(HTMLParser):
     self.current_div_data = ''
 
   def handle_starttag(self, tag, attrs):
-    # print("Encountered a start tag:", tag, attrs)
     self.current_div_attrs = attrs
 
   def handle_endtag(self, tag):
-    #print("Encountered an end tag :", tag)
     if [True for k, v in self.current_div_attrs if k == "tiddler"]:
       self.tiddler_divs.append((self.current_div_attrs,
                                 self.current_div_data))
     else:
-      #print("have some problems recording data", self.current_div_attrs, self.current_div_data)
-      pass
+      self.empty_divs_found += 1
+      if self.empty_divs_found > self.empty_divs_allowed:
+        print("have some problems recording data", self.current_div_attrs, self.current_div_data)
     self.reset_current_div()    
 
   def handle_data(self, data):
@@ -201,10 +202,9 @@ def graphify_tiddlers(tiddlers):
   for name, tiddler in tiddlers.items():
     if type(tiddler) == TiddlerStylesheet:
       stylesheet_lookup[tiddler.stylesheet_name] = tiddler.name
-  print(stylesheet_lookup)
   for name, tiddler in tiddlers.items():
-    tiddler.indegrees = []
-    tiddler.outdegrees = []
+    tiddler.indegrees = set()
+    tiddler.outdegrees = set()
   for name, tiddler in tiddlers.items():
     if type(tiddler) == TiddlerImage:
       continue
@@ -213,108 +213,81 @@ def graphify_tiddlers(tiddlers):
         if image not in tiddlers:
           print("WARNING (image referenced but not found):", image)
         else:
-          tiddler.outdegrees.append(image)
+          tiddler.outdegrees.add(image)
     if type(tiddler) == TiddlerText:
       for stylesheet in tiddler.stylesheets:
         if stylesheet not in ["bookmark", "script"]: #protected twine tags
           if stylesheet not in stylesheet_lookup:
             print("WARNING (broken, useless and/or unregistered tag):", stylesheet)
           else:
-            tiddler.outdegrees.append(stylesheet_lookup[stylesheet])
+            tiddler.outdegrees.add(stylesheet_lookup[stylesheet])
       for cond, choice_tuple in tiddler.choices:
         text, dest, effects = choice_tuple
         if dest not in ["previous()"]:
           if dest not in tiddlers:
             print("WARNING (choice destination not found):", dest)
           else:
-            tiddler.outdegrees.append(dest)
+            tiddler.outdegrees.add(dest)
       for conds, effect in tiddler.effects:
         if effect.startswith("display "):
           dest = effect.split(" ", 1)[1]
           if dest not in tiddlers:
             print("WARNING (display destination not found):", dest)
           else:
-            tiddler.outdegrees.append(dest)
+            tiddler.outdegrees.add(dest)
   for name, tiddler in tiddlers.items():
     for outdegree in tiddler.outdegrees:
-      tiddlers[outdegree].indegrees.append(name)
+      tiddlers[outdegree].indegrees.add(name)
   for name, tiddler in tiddlers.items():
-    if tiddler.indegrees == []:
-      print(name)
+    if tiddler.indegrees == set():
+      print("Origin found:", name)
 
-def tiddlers_graph_order(tiddlers):
-  # Idea: the graph is converted into a tree (where any loops are removed)
-  # For each origin (a tiddler with no indegrees), the tiddler is iterated through in a depth-first fashion.
-  # There's multiple branches, which have starts and ends, and may even merge to later points.
-  # These branches are merged.
-  # A B C1 C2 D
-  # In this case, the order of evaluation is A B D (C1 C2), and since C1 C2 is bigger than B, it is placed between B and D (otherwise placed between A and B)
-  # This is not guaranteed to work with all trees.
-  # If outdegree is a stylesheet or image, always include the referenced image
-  ordered_tiddlers = []
-  for name, tiddler in tiddler.items():
-    if tiddler.indegrees == []:
-      res = [(None,name), name]
-      for outdegree in tiddler.outdegrees:
-        l = generate_list(tiddlers[outdegree], current_list, master_list)
-        res = merge_list(res, l, ordered_tiddlers)
+def sort_outdegrees_depth(outdegrees, tiddler_depths):
+  def tiddler_depth(name):
+    return len(tiddler_depths[name])
+  outdegrees.sort(key = tiddler_depth, reverse = True)
 
-  for name, tiddler in tiddler.items():
-    if tiddler.indegrees == []:
-      res = generate_list(tiddler, ordered_tiddlers)
-      ordered_tiddlers = merge_list(res, ordered_tiddlers)
+def tiddlers_smart_topological_sort(tiddlers):
+  # Approximate topological sort, preferring to list smaller branches before larger branches
+  # Loops are "ignored" by detecting the loop and not recursing deeper
+  # Some extremely interwoven graphs may not render desirably (additional heuristics may need to be added).
+  # Stylesheets and images are not recursed into, on the basis that they are resusable.
+  tiddler_depths = {}
+  visited_tiddlers = []
+  # First, estimate the size of each tiddler's branch (for sorting)
+  for name, tiddler in tiddlers.items():
+    if tiddler.indegrees == set():
+      estimate_branch_size_recursive(tiddlers, name, tiddler_depths, visited_tiddlers)
+  # Second, topological sort using branch size to determine ordering
+  sort_res = []
+  visited_tiddlers_2 = []
+  insert_order = []
+  origins = [name for name in tiddlers if tiddlers[name].indegrees == set()]
+  sort_outdegrees_depth(origins, tiddler_depths)
+  for origin in origins:
+    recursive_smart_topological_sort(tiddlers, origin, tiddler_depths, visited_tiddlers_2, sort_res)
+  return sort_res
 
+def recursive_smart_topological_sort(tiddlers, name, tiddler_depths, visited_tiddlers, res):
+  visited_tiddlers.append(name)
+  traversible_outdegrees = [o for o in tiddlers[name].outdegrees if type(tiddlers[o]) == TiddlerText]
+  sort_outdegrees_depth(traversible_outdegrees, tiddler_depths)
+  for outdegree in traversible_outdegrees:
+    if outdegree not in visited_tiddlers:
+      recursive_smart_topological_sort(tiddlers, outdegree, tiddler_depths, visited_tiddlers, res)
 
-def generate_list(tiddler, master_list, current_list = []):
-  pass #TODO
+  res.insert(0, name)
 
-def merge_list(cumulative_res, temp_res):
-  if res[-1] in ordered_res:
-    if res[1] in ordered_res:
-      ordered_res = ordered_res[:-1] + res + ordered_res[-1:]
-
-def find_merge_point(res1, res2):
-  if res1[-1][0] not in res2 and res1[0][1] not in res1:
-    get_branch_lengths(res1[-1][0], res1[0][1], len(res1))
-
-
-    #dead end, so must be inserted at very beginning, very end, or at one of the starts of the branch.
-
-def find_merge_point_2(res1, res2):
-  looking_for_start = True
-  start_index = 0
-  current_best_index = 0
-  for i, v in enumerate(res2):
-    if looking_for_start: # avoid resetting index on sub-forks.
-      if type(v) == tuple and v[0] == res1[0][0]:
-        start_index = i
-        looking_for_start = False
-    else:
-      if type(v) == tuple and v[1] == res1[-1][1]:
-        segment_length = 1+i-start_index
-        if segment_length > len_reference:
-          return start_index
-        else:
-          current_best_index = i+1
-          looking_for_start = True
-  return current_best_index
-
-# A B1 B2 C1 C2 D E
-# insert A F G E
-
-def get_branch_lengths(res2, start, stop, len_reference):
-  start_index = 0
-  current_best_index = 0
-  for i, v in enumerate(res2):
-    if type(v) == tuple and v[0] == start:
-      start_index = i
-    if type(v) == tuple and v[1] == stop:
-      segment_length = i-start_index
-      if segment_length > len_reference:
-        return start_index
-      else:
-        current_best_index = i+1
-  return current_best_index
+def estimate_branch_size_recursive(tiddlers, name, tiddler_depths, visited_tiddlers):
+  visited_tiddlers.append(name)
+  tiddler_depths[name] = set([name])
+  traversible_outdegrees = [o for o in tiddlers[name].outdegrees if type(tiddlers[o]) == TiddlerText]
+  for outdegree in traversible_outdegrees:
+    if outdegree not in visited_tiddlers:
+      estimate_branch_size_recursive(tiddlers, outdegree, tiddler_depths, visited_tiddlers)
+  # print(name, [(outdegree, len(tiddler_depths[outdegree])) for outdegree in traversible_outdegrees])
+  for outdegree in traversible_outdegrees:
+    tiddler_depths[name] |= tiddler_depths[outdegree] # 1 if loop
 
 
 import sys
@@ -326,3 +299,6 @@ with open(sys.argv[1]) as f:
       parser.feed(line)
 tiddlers = parser.postprocess_tiddler()
 graphify_tiddlers(tiddlers)
+sorted_tiddlers = tiddlers_smart_topological_sort(tiddlers)
+for name in sorted_tiddlers:
+  print(name, len(tiddler_depths[name])) #TODO: Add pretty printing of tiddlers
