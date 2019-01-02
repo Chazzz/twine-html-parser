@@ -1,3 +1,6 @@
+import sys
+import argparse
+
 class Tiddler(object):
   def __init__(self, attrs, data):
     self.attrs = attrs
@@ -29,7 +32,7 @@ class TiddlerStylesheet(Tiddler):
     for k, v in attrs:
       if k == "tags":
         if len(v.split(" ")) == 1:
-          return ""
+          return self.get_name(attrs)
         else:
           return v.split(" ")[1]
 
@@ -216,7 +219,7 @@ def graphify_tiddlers(tiddlers):
           tiddler.outdegrees.add(image)
     if type(tiddler) == TiddlerText:
       for stylesheet in tiddler.stylesheets:
-        if stylesheet not in ["bookmark", "script"]: #protected twine tags
+        if stylesheet not in ["bookmark", "script", ""]: #protected twine tags
           if stylesheet not in stylesheet_lookup:
             print("WARNING (broken, useless and/or unregistered tag):", stylesheet)
           else:
@@ -289,16 +292,58 @@ def estimate_branch_size_recursive(tiddlers, name, tiddler_depths, visited_tiddl
   for outdegree in traversible_outdegrees:
     tiddler_depths[name] |= tiddler_depths[outdegree] # 1 if loop
 
+def text_to_printable_text(parsed_text):
+  res = parsed_text.replace("\\n", "\n")
+  res = res.replace("<", "&lt")
+  res = res.replace(">", "&gt")
+  res = res.replace("“", "&ldquo;")
+  res = res.replace("”", "&rdquo;")
+  return res
 
-import sys
-# instantiate the parser and fed it some HTML
-parser = MyHTMLParser()
-with open(sys.argv[1]) as f:
-  for line in f.readlines():
-    if "tiddler=" in line:
-      parser.feed(line)
-tiddlers = parser.postprocess_tiddler()
-graphify_tiddlers(tiddlers)
-sorted_tiddlers = tiddlers_smart_topological_sort(tiddlers)
-for name in sorted_tiddlers:
-  print(name, len(tiddler_depths[name])) #TODO: Add pretty printing of tiddlers
+def pretty_print_tiddlers(tiddlers, print_order=None, dest=None):
+  if print_order == None:
+    print_order = tiddlers.keys()
+  if dest == None:
+    print("Outputting to command line")
+    out_file = sys.stdout
+  else:
+    print("Outputting to", dest)
+    out_file=open(dest, 'w+')
+  try:
+    print('<style type="text/css">div {white-space: pre-wrap; word-wrap: break-word;}</style>', file=out_file)
+    for name in print_order:
+      print("<div><p>", file=out_file)
+      print("<h2>", name, "</h2>", file=out_file)
+      for image in tiddlers[name].images:
+        if image in tiddlers:
+          print('<img data-passage="', image, '" src="', tiddlers[image].data, '">', file=out_file)
+      for stylesheet in [ss for ss in tiddlers[name].outdegrees if type(tiddlers[ss]) == TiddlerStylesheet]:
+        for image in tiddlers[stylesheet].images:
+          if image in tiddlers:
+            print('<img data-passage="', image, '" src="', tiddlers[image].data, '">', file=out_file)
+      print(text_to_printable_text(tiddlers[name].data), file=out_file)
+      print("</p></div>", file=out_file)
+  except Exception as e:
+    raise e
+  finally:
+    out_file.close()
+
+def main(src, dest=None):
+  # instantiate the parser and fed it some HTML
+  parser = MyHTMLParser()
+  with open(src) as f:
+    for line in f.readlines():
+      if "tiddler=" in line:
+        parser.feed(line)
+  tiddlers = parser.postprocess_tiddler()
+  graphify_tiddlers(tiddlers)
+  sorted_tiddler_names = tiddlers_smart_topological_sort(tiddlers)
+  pretty_print_tiddlers(tiddlers, sorted_tiddler_names, dest)
+
+if __name__ == '__main__':
+  parser = argparse.ArgumentParser()
+  parser.add_argument("src", help="Source html file to process")
+  parser.add_argument("dest", help="Destination html file for processed tiddlers", type=str, default=None)
+
+  args = parser.parse_args()
+  main(args.src, args.dest)
